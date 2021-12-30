@@ -97,7 +97,7 @@ VideoState::VideoState()
 {
     mFlushPktData = flush_pkt.data;
 
-// This is not needed anymore above FFMpeg version 4.0
+// This is not needed any more above FFMpeg version 4.0
 #if LIBAVCODEC_VERSION_INT < 3805796
     av_register_all();
 #endif
@@ -130,31 +130,31 @@ void PacketQueue::put(AVPacket *pkt)
 
     pkt1->next = nullptr;
 
-    std::lock_guard<std::mutex> lock(this->mutex);
+    std::lock_guard<std::mutex> lock(mutex);
     PacketList* ptr = pkt1.release();
     if(!last_pkt)
-        this->first_pkt = ptr;
+        first_pkt = ptr;
     else
-        this->last_pkt->next = ptr;
-    this->last_pkt = ptr;
-    this->nb_packets++;
-    this->size += ptr->pkt->size;
-    this->cond.notify_one();
+        last_pkt->next = ptr;
+    last_pkt = ptr;
+    nb_packets++;
+    size += ptr->pkt->size;
+    cond.notify_one();
 }
 
 int PacketQueue::get(AVPacket *pkt, VideoState *is)
 {
-    std::unique_lock<std::mutex> lock(this->mutex);
+    std::unique_lock<std::mutex> lock(mutex);
     while(!is->mQuit)
     {
-        PacketList *pkt1 = this->first_pkt;
+        PacketList *pkt1 = first_pkt;
         if(pkt1)
         {
-            this->first_pkt = pkt1->next;
-            if(!this->first_pkt)
-                this->last_pkt = nullptr;
-            this->nb_packets--;
-            this->size -= pkt1->pkt->size;
+            first_pkt = pkt1->next;
+            if(!first_pkt)
+                last_pkt = nullptr;
+            nb_packets--;
+            size -= pkt1->pkt->size;
 
             av_packet_unref(pkt);
             av_packet_move_ref(pkt, pkt1->pkt);
@@ -163,9 +163,9 @@ int PacketQueue::get(AVPacket *pkt, VideoState *is)
             return 1;
         }
 
-        if(this->flushing)
+        if(flushing)
             break;
-        this->cond.wait(lock);
+        cond.wait(lock);
     }
 
     return -1;
@@ -173,31 +173,31 @@ int PacketQueue::get(AVPacket *pkt, VideoState *is)
 
 void PacketQueue::flush()
 {
-    this->flushing = true;
-    this->cond.notify_one();
+    flushing = true;
+    cond.notify_one();
 }
 
 void PacketQueue::clear()
 {
     PacketList *pkt, *pkt1;
 
-    std::lock_guard<std::mutex> lock(this->mutex);
-    for(pkt = this->first_pkt; pkt != nullptr; pkt = pkt1)
+    std::lock_guard<std::mutex> lock(mutex);
+    for(pkt = first_pkt; pkt != nullptr; pkt = pkt1)
     {
         pkt1 = pkt->next;
         if (pkt->pkt->data != flush_pkt.data)
             av_packet_unref(pkt->pkt);
         av_freep(&pkt);
     }
-    this->last_pkt = nullptr;
-    this->first_pkt = nullptr;
-    this->nb_packets = 0;
-    this->size = 0;
+    last_pkt = nullptr;
+    first_pkt = nullptr;
+    nb_packets = 0;
+    size = 0;
 }
 
 int VideoPicture::set_dimensions(int w, int h) {
-  if (this->rgbaFrame != nullptr && this->rgbaFrame->width == w &&
-      this->rgbaFrame->height == h) {
+  if (rgbaFrame != nullptr && rgbaFrame->width == w &&
+      rgbaFrame->height == h) {
     return 0;
   }
 
@@ -218,7 +218,7 @@ int VideoPicture::set_dimensions(int w, int h) {
     return -1;
   }
 
-  this->rgbaFrame = std::move(frame);
+  rgbaFrame = std::move(frame);
   return 0;
 }
 
@@ -279,7 +279,7 @@ int64_t VideoState::istream_seek(void *user_data, int64_t offset, int whence)
 
 void VideoState::video_display(VideoPicture *vp)
 {
-    if(this->video_ctx->width != 0 && this->video_ctx->height != 0)
+    if(video_ctx->width != 0 && video_ctx->height != 0)
     {
         if (!mTexture.get())
         {
@@ -292,7 +292,7 @@ void VideoState::video_display(VideoPicture *vp)
 
         osg::ref_ptr<osg::Image> image = new osg::Image;
 
-        image->setImage(this->video_ctx->width, this->video_ctx->height,
+        image->setImage(video_ctx->width, video_ctx->height,
                         1, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE, vp->rgbaFrame->data[0], osg::Image::NO_DELETE);
 
         mTexture->setImage(image);
@@ -301,49 +301,49 @@ void VideoState::video_display(VideoPicture *vp)
 
 void VideoState::video_refresh()
 {
-    std::lock_guard<std::mutex> lock(this->pictq_mutex);
-    if(this->pictq_size == 0)
+    std::lock_guard<std::mutex> lock(pictq_mutex);
+    if(pictq_size == 0)
         return;
 
-    if (this->av_sync_type == AV_SYNC_VIDEO_MASTER)
+    if (av_sync_type == AV_SYNC_VIDEO_MASTER)
     {
-        VideoPicture* vp = &this->pictq[this->pictq_rindex];
-        this->video_display(vp);
+        VideoPicture* vp = &pictq[pictq_rindex];
+        video_display(vp);
 
-        this->pictq_rindex = (pictq_rindex+1) % VIDEO_PICTURE_ARRAY_SIZE;
-        this->frame_last_pts = vp->pts;
-        this->pictq_size--;
-        this->pictq_cond.notify_one();
+        pictq_rindex = (pictq_rindex+1) % pictq.size();
+        frame_last_pts = vp->pts;
+        pictq_size--;
+        pictq_cond.notify_one();
     }
     else
     {
         const float threshold = 0.03f;
-        if (this->pictq[pictq_rindex].pts > this->get_master_clock() + threshold)
+        if (pictq[pictq_rindex].pts > get_master_clock() + threshold)
             return; // not ready yet to show this picture
 
         // TODO: the conversion to RGBA is done in the decoding thread, so if a picture is skipped here, then it was
         // unnecessarily converted. But we may want to replace the conversion by a pixel shader anyway (see comment in queue_picture)
         int i=0;
-        for (; i<this->pictq_size-1; ++i)
+        for (; i<pictq_size-1; ++i)
         {
-            if (this->pictq[pictq_rindex].pts + threshold <= this->get_master_clock())
-                this->pictq_rindex = (this->pictq_rindex+1) % VIDEO_PICTURE_ARRAY_SIZE; // not enough time to show this picture
+            if (pictq[pictq_rindex].pts + threshold <= get_master_clock())
+                pictq_rindex = (pictq_rindex+1) % pictq.size(); // not enough time to show this picture
             else
                 break;
         }
 
-        assert (this->pictq_rindex < VIDEO_PICTURE_ARRAY_SIZE);
-        VideoPicture* vp = &this->pictq[this->pictq_rindex];
+        assert (pictq_rindex < VIDEO_PICTURE_ARRAY_SIZE);
+        VideoPicture* vp = &pictq[pictq_rindex];
 
-        this->video_display(vp);
+        video_display(vp);
 
-        this->frame_last_pts = vp->pts;
+        frame_last_pts = vp->pts;
 
-        this->pictq_size -= i;
+        pictq_size -= i;
         // update queue for next picture
-        this->pictq_size--;
-        this->pictq_rindex = (this->pictq_rindex+1) % VIDEO_PICTURE_ARRAY_SIZE;
-        this->pictq_cond.notify_one();
+        pictq_size--;
+        pictq_rindex = (pictq_rindex+1) % pictq.size();
+        pictq_cond.notify_one();
     }
 }
 
@@ -354,46 +354,46 @@ int VideoState::queue_picture(const AVFrame &pFrame, double pts)
 
     /* wait until we have a new pic */
     {
-        std::unique_lock<std::mutex> lock(this->pictq_mutex);
-        while(this->pictq_size >= VIDEO_PICTURE_QUEUE_SIZE && !this->mQuit)
-            this->pictq_cond.wait_for(lock, std::chrono::milliseconds(1));
+        std::unique_lock<std::mutex> lock(pictq_mutex);
+        while(pictq_size >= VIDEO_PICTURE_QUEUE_SIZE && !mQuit)
+            pictq_cond.wait_for(lock, std::chrono::milliseconds(1));
     }
-    if(this->mQuit)
+    if(mQuit)
         return -1;
 
-    std::lock_guard<std::mutex> lock(this->pictq_mutex);
+    std::lock_guard<std::mutex> lock(pictq_mutex);
 
     // windex is set to 0 initially
-    vp = &this->pictq[this->pictq_windex];
+    vp = &pictq[pictq_windex];
 
     // Convert the image into RGBA format
     // TODO: we could do this in a pixel shader instead, if the source format
     // matches a commonly used format (ie YUV420P)
     const int w = pFrame.width;
     const int h = pFrame.height;
-    if(this->sws_context == nullptr || this->sws_context_w != w || this->sws_context_h != h)
+    if(sws_context == nullptr || sws_context_w != w || sws_context_h != h)
     {
-        if (this->sws_context != nullptr)
-            sws_freeContext(this->sws_context);
-        this->sws_context = sws_getContext(w, h, this->video_ctx->pix_fmt,
+        if (sws_context != nullptr)
+            sws_freeContext(sws_context);
+        sws_context = sws_getContext(w, h, video_ctx->pix_fmt,
                                            w, h, AV_PIX_FMT_RGBA, SWS_BICUBIC,
                                            nullptr, nullptr, nullptr);
-        if(this->sws_context == nullptr)
+        if(sws_context == nullptr)
             throw std::runtime_error("Cannot initialize the conversion context!\n");
-        this->sws_context_w = w;
-        this->sws_context_h = h;
+        sws_context_w = w;
+        sws_context_h = h;
     }
 
     vp->pts = pts;
     if (vp->set_dimensions(w, h) < 0)
         return -1;
 
-    sws_scale(this->sws_context, pFrame.data, pFrame.linesize,
-              0, this->video_ctx->height, vp->rgbaFrame->data, vp->rgbaFrame->linesize);
+    sws_scale(sws_context, pFrame.data, pFrame.linesize,
+              0, video_ctx->height, vp->rgbaFrame->data, vp->rgbaFrame->linesize);
 
     // now we inform our display thread that we have a pic ready
-    this->pictq_windex = (this->pictq_windex+1) % VIDEO_PICTURE_ARRAY_SIZE;
-    this->pictq_size++;
+    pictq_windex = (pictq_windex+1) % pictq.size();
+    pictq_size++;
 
     return 0;
 }
@@ -404,16 +404,16 @@ double VideoState::synchronize_video(const AVFrame &src_frame, double pts)
 
     /* if we have pts, set video clock to it */
     if(pts != 0)
-        this->video_clock = pts;
+        video_clock = pts;
     else
-        pts = this->video_clock;
+        pts = video_clock;
 
     /* update the video clock */
-    frame_delay = av_q2d(this->video_ctx->pkt_timebase);
+    frame_delay = av_q2d(video_ctx->pkt_timebase);
 
     /* if we are repeating a frame, adjust clock accordingly */
     frame_delay += src_frame.repeat_pict * (frame_delay * 0.5);
-    this->video_clock += frame_delay;
+    video_clock += frame_delay;
 
     return pts;
 }
@@ -629,8 +629,8 @@ private:
 
 bool VideoState::update()
 {
-    this->video_refresh();
-    return !this->mVideoEnded;
+    video_refresh();
+    return !mVideoEnded;
 }
 
 
@@ -650,18 +650,18 @@ int VideoState::stream_open(int stream_index, AVFormatContext *pFormatCtx)
     switch(pFormatCtx->streams[stream_index]->codecpar->codec_type)
     {
     case AVMEDIA_TYPE_AUDIO:
-        this->audio_st = pFormatCtx->streams + stream_index;
+        audio_st = pFormatCtx->streams + stream_index;
 
         // Get a pointer to the codec context for the video stream
-        this->audio_ctx = avcodec_alloc_context3(codec);
-        avcodec_parameters_to_context(this->audio_ctx, pFormatCtx->streams[stream_index]->codecpar);
+        audio_ctx = avcodec_alloc_context3(codec);
+        avcodec_parameters_to_context(audio_ctx, pFormatCtx->streams[stream_index]->codecpar);
 
-// This is not needed anymore above FFMpeg version 4.0
+// This is not needed any more above FFMpeg version 4.0
 #if LIBAVCODEC_VERSION_INT < 3805796
-        av_codec_set_pkt_timebase(this->audio_ctx, pFormatCtx->streams[stream_index]->time_base);
+        av_codec_set_pkt_timebase(audio_ctx, pFormatCtx->streams[stream_index]->time_base);
 #endif
 
-        if (avcodec_open2(this->audio_ctx, codec, nullptr) < 0)
+        if (avcodec_open2(audio_ctx, codec, nullptr) < 0)
         {
             fprintf(stderr, "Unsupported codec!\n");
             return -1;
@@ -670,8 +670,8 @@ int VideoState::stream_open(int stream_index, AVFormatContext *pFormatCtx)
         if (!mAudioFactory)
         {
             std::cerr << "No audio factory registered, can not play audio stream" << std::endl;
-            avcodec_free_context(&this->audio_ctx);
-            this->audio_st = nullptr;
+            avcodec_free_context(&audio_ctx);
+            audio_st = nullptr;
             return -1;
         }
 
@@ -679,32 +679,32 @@ int VideoState::stream_open(int stream_index, AVFormatContext *pFormatCtx)
         if (!mAudioDecoder.get())
         {
             std::cerr << "Failed to create audio decoder, can not play audio stream" << std::endl;
-            avcodec_free_context(&this->audio_ctx);
-            this->audio_st = nullptr;
+            avcodec_free_context(&audio_ctx);
+            audio_st = nullptr;
             return -1;
         }
         mAudioDecoder->setupFormat();
         break;
 
     case AVMEDIA_TYPE_VIDEO:
-        this->video_st = pFormatCtx->streams + stream_index;
+        video_st = pFormatCtx->streams + stream_index;
 
         // Get a pointer to the codec context for the video stream
-        this->video_ctx = avcodec_alloc_context3(codec);
-        avcodec_parameters_to_context(this->video_ctx, pFormatCtx->streams[stream_index]->codecpar);
+        video_ctx = avcodec_alloc_context3(codec);
+        avcodec_parameters_to_context(video_ctx, pFormatCtx->streams[stream_index]->codecpar);
 
-// This is not needed anymore above FFMpeg version 4.0
+// This is not needed any more above FFMpeg version 4.0
 #if LIBAVCODEC_VERSION_INT < 3805796
-        av_codec_set_pkt_timebase(this->video_ctx, pFormatCtx->streams[stream_index]->time_base);
+        av_codec_set_pkt_timebase(video_ctx, pFormatCtx->streams[stream_index]->time_base);
 #endif
 
-        if (avcodec_open2(this->video_ctx, codec, nullptr) < 0)
+        if (avcodec_open2(video_ctx, codec, nullptr) < 0)
         {
             fprintf(stderr, "Unsupported codec!\n");
             return -1;
         }
 
-        this->video_thread = std::make_unique<VideoThread>(this);
+        video_thread = std::make_unique<VideoThread>(this);
         break;
 
     default:
@@ -720,19 +720,19 @@ void VideoState::init(std::shared_ptr<std::istream> inputstream, const std::stri
     int audio_index = -1;
     unsigned int i;
 
-    this->av_sync_type = AV_SYNC_DEFAULT;
-    this->mQuit = false;
+    av_sync_type = AV_SYNC_DEFAULT;
+    mQuit = false;
 
-    this->stream = std::move(inputstream);
-    if(!this->stream.get())
+    stream = std::move(inputstream);
+    if(!stream.get())
         throw std::runtime_error("Failed to open video resource");
 
     AVIOContext *ioCtx = avio_alloc_context(nullptr, 0, 0, this, istream_read, istream_write, istream_seek);
     if(!ioCtx) throw std::runtime_error("Failed to allocate AVIOContext");
 
-    this->format_ctx = avformat_alloc_context();
-    if(this->format_ctx)
-        this->format_ctx->pb = ioCtx;
+    format_ctx = avformat_alloc_context();
+    if(format_ctx)
+        format_ctx->pb = ioCtx;
 
     // Open video file
     ///
@@ -741,22 +741,22 @@ void VideoState::init(std::shared_ptr<std::istream> inputstream, const std::stri
     ///
     /// https://trac.ffmpeg.org/ticket/1357
     ///
-    if(!this->format_ctx || avformat_open_input(&this->format_ctx, name.c_str(), nullptr, nullptr))
+    if(!format_ctx || avformat_open_input(&format_ctx, name.c_str(), nullptr, nullptr))
     {
-        if (this->format_ctx != nullptr)
+        if (format_ctx != nullptr)
         {
-          if (this->format_ctx->pb != nullptr)
+          if (format_ctx->pb != nullptr)
           {
-              av_freep(&this->format_ctx->pb->buffer);
+              av_freep(&format_ctx->pb->buffer);
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 80, 100)
-              avio_context_free(&this->format_ctx->pb);
+              avio_context_free(&format_ctx->pb);
 #else
-              av_freep(&this->format_ctx->pb);
+              av_freep(&format_ctx->pb);
 #endif
           }
         }
         // "Note that a user-supplied AVFormatContext will be freed on failure."
-        this->format_ctx = nullptr;
+        format_ctx = nullptr;
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 80, 100)
         avio_context_free(&ioCtx);
 #else
@@ -766,66 +766,66 @@ void VideoState::init(std::shared_ptr<std::istream> inputstream, const std::stri
     }
 
     // Retrieve stream information
-    if(avformat_find_stream_info(this->format_ctx, nullptr) < 0)
+    if(avformat_find_stream_info(format_ctx, nullptr) < 0)
         throw std::runtime_error("Failed to retrieve stream information");
 
     // Dump information about file onto standard error
-    av_dump_format(this->format_ctx, 0, name.c_str(), 0);
+    av_dump_format(format_ctx, 0, name.c_str(), 0);
 
-    for(i = 0;i < this->format_ctx->nb_streams;i++)
+    for(i = 0;i < format_ctx->nb_streams;i++)
     {
-        if(this->format_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && video_index < 0)
+        if(format_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && video_index < 0)
             video_index = i;
-        if(this->format_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && audio_index < 0)
+        if(format_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && audio_index < 0)
             audio_index = i;
     }
 
     mExternalClock.set(0);
 
     if(audio_index >= 0)
-        this->stream_open(audio_index, this->format_ctx);
+        stream_open(audio_index, format_ctx);
 
     if(video_index >= 0)
     {
-        this->stream_open(video_index, this->format_ctx);
+        stream_open(video_index, format_ctx);
     }
 
 
-    this->parse_thread = std::make_unique<ParseThread>(this);
+    parse_thread = std::make_unique<ParseThread>(this);
 }
 
 void VideoState::deinit()
 {
-    this->mQuit = true;
+    mQuit = true;
 
-    this->audioq.flush();
-    this->videoq.flush();
+    audioq.flush();
+    videoq.flush();
 
     mAudioDecoder.reset();
 
-    if (this->parse_thread)
+    if (parse_thread)
     {
-        this->parse_thread.reset();
+        parse_thread.reset();
     }
-    if (this->video_thread)
+    if (video_thread)
     {
-        this->video_thread.reset();
+        video_thread.reset();
     }
 
-    if(this->audio_ctx)
-        avcodec_free_context(&this->audio_ctx);
-    this->audio_st = nullptr;
-    this->audio_ctx = nullptr;
-    if(this->video_ctx)
-        avcodec_free_context(&this->video_ctx);
-    this->video_st = nullptr;
-    this->video_ctx = nullptr;
+    if(audio_ctx)
+        avcodec_free_context(&audio_ctx);
+    audio_st = nullptr;
+    audio_ctx = nullptr;
+    if(video_ctx)
+        avcodec_free_context(&video_ctx);
+    video_st = nullptr;
+    video_ctx = nullptr;
 
-    if(this->sws_context)
-        sws_freeContext(this->sws_context);
-    this->sws_context = nullptr;
+    if(sws_context)
+        sws_freeContext(sws_context);
+    sws_context = nullptr;
 
-    if(this->format_ctx)
+    if(format_ctx)
     {
         ///
         /// format_ctx->pb->buffer must be freed by hand,
@@ -833,16 +833,16 @@ void VideoState::deinit()
         ///
         /// https://trac.ffmpeg.org/ticket/1357
         ///
-        if (this->format_ctx->pb != nullptr)
+        if (format_ctx->pb != nullptr)
         {
-            av_freep(&this->format_ctx->pb->buffer);
+            av_freep(&format_ctx->pb->buffer);
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 80, 100)
-            avio_context_free(&this->format_ctx->pb);
+            avio_context_free(&format_ctx->pb);
 #else
-            av_freep(&this->format_ctx->pb);
+            av_freep(&format_ctx->pb);
 #endif
         }
-        avformat_close_input(&this->format_ctx);
+        avformat_close_input(&format_ctx);
     }
 
     if (mTexture)
@@ -852,8 +852,8 @@ void VideoState::deinit()
         mTexture = nullptr;
     }
 
-    // Dellocate RGBA frame queue.
-    for (auto & i : this->pictq)
+    // Deallocate RGBA frame queue.
+    for (auto & i : pictq)
         i.rgbaFrame = nullptr;
 
 }
@@ -865,16 +865,16 @@ double VideoState::get_external_clock()
 
 double VideoState::get_master_clock()
 {
-    if(this->av_sync_type == AV_SYNC_VIDEO_MASTER)
-        return this->get_video_clock();
-    if(this->av_sync_type == AV_SYNC_AUDIO_MASTER)
-        return this->get_audio_clock();
-    return this->get_external_clock();
+    if(av_sync_type == AV_SYNC_VIDEO_MASTER)
+        return get_video_clock();
+    if(av_sync_type == AV_SYNC_AUDIO_MASTER)
+        return get_audio_clock();
+    return get_external_clock();
 }
 
 double VideoState::get_video_clock() const
 {
-    return this->frame_last_pts;
+    return frame_last_pts;
 }
 
 double VideoState::get_audio_clock()
@@ -886,7 +886,7 @@ double VideoState::get_audio_clock()
 
 void VideoState::setPaused(bool isPaused)
 {
-    this->mPaused = isPaused;
+    mPaused = isPaused;
     mExternalClock.setPaused(isPaused);
 }
 
@@ -900,7 +900,7 @@ void VideoState::seekTo(double time)
 
 double VideoState::getDuration() const
 {
-    return this->format_ctx->duration / 1000000.0;
+    return format_ctx->duration / 1000000.0;
 }
 
 
